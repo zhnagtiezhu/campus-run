@@ -1,0 +1,34 @@
+# 环境/密钥（真实值只放本地 .env，不入库）
+.env
+deploy/.env
+
+# Java
+backend-java/target/
+backend-java/logs/
+*.class
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+chroma_data/
+model_cache/
+models/
+
+# 前端
+node_modules/
+frontend/*/dist/
+frontend/*/node_modules/
+*.local
+
+# 数据卷与压测产物
+data/
+*.log
+*.jtl
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

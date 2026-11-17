@@ -1,0 +1,546 @@
+{
+  "info": {
+    "name": "campus-run 冒烟集（v1.2）",
+    "description": "campus-run 三端主流程 + 失败分支 + Agent 工具安全用例。\n用法：先跑 01 认证（变量写入 collection variables），再按顺序跑 02 happy path；03 失败分支建议在重置演示数据后单独跑（N-01/N-02 依赖 Redis 状态，N-09 依赖 02 的 order_no/quote_token）。N-11~N-13 为取件码负向用例：先跑「辅助：接单骑手登录」写入 rider2_token，连错三次锁码 10 分钟，重置演示数据后恢复。\n变量：base_url、agent_base_url、agent_token 请在 collection variables 里按环境修改。",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "http://localhost:8080" },
+    { "key": "agent_base_url", "value": "http://localhost:8000" },
+    { "key": "agent_token", "value": "change-me-agent-token" },
+    { "key": "student_token", "value": "" },
+    { "key": "rider_token", "value": "" },
+    { "key": "rider2_token", "value": "" },
+    { "key": "admin_token", "value": "" },
+    { "key": "order_no", "value": "" },
+    { "key": "quote_token", "value": "" },
+    { "key": "pickup_code", "value": "" },
+    { "key": "ticket_no", "value": "" },
+    { "key": "session_id", "value": "" }
+  ],
+  "item": [
+    {
+      "name": "01 认证与公共",
+      "item": [
+        {
+          "name": "C-02 学生登录",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/auth/user/login", "host": ["{{base_url}}"], "path": ["api", "auth", "user", "login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800000001\",\n  \"code\": \"123456\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('code=0', () => pm.expect(j.code).to.eql(0));",
+            "pm.collectionVariables.set('student_token', j.data.token);"
+          ] } }]
+        },
+        {
+          "name": "C-03 骑手登录",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/auth/rider/login", "host": ["{{base_url}}"], "path": ["api", "auth", "rider", "login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800000006\",\n  \"password\": \"123456\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('code=0', () => pm.expect(j.code).to.eql(0));",
+            "pm.collectionVariables.set('rider_token', j.data.token);"
+          ] } }]
+        },
+        {
+          "name": "C-04 运营登录",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/auth/admin/login", "host": ["{{base_url}}"], "path": ["api", "auth", "admin", "login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"username\": \"admin\",\n  \"password\": \"Admin@123\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('code=0', () => pm.expect(j.code).to.eql(0));",
+            "pm.collectionVariables.set('admin_token', j.data.token);"
+          ] } }]
+        },
+        {
+          "name": "C-05 校区配置",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/common/campus", "host": ["{{base_url}}"], "path": ["api", "common", "campus"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('半径=2000', () => pm.expect(d.radius_m).to.eql(2000));",
+            "pm.test('默认起点存在', () => pm.expect(d.default_origins).to.be.an('object'));"
+          ] } }]
+        },
+        {
+          "name": "C-07 健康检查",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{base_url}}/api/common/health", "host": ["{{base_url}}"], "path": ["api", "common", "health"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('code=0 且 db/redis ok', () => { pm.expect(j.code).to.eql(0); pm.expect(j.data.db).to.eql('ok'); pm.expect(j.data.redis).to.eql('ok'); });"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "02 happy path（下单→抢单→取送→结算→工单）",
+      "item": [
+        {
+          "name": "U-07 报价（1250m / 1kg）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" },
+              { "key": "X-Trace-Id", "value": "smoke-quote-001" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/order/quote", "host": ["{{base_url}}"], "path": ["api", "user", "order", "quote"] },
+            "body": { "mode": "raw", "raw": "{\n  \"category\": 1,\n  \"from_addr\": \"菜鸟驿站（东门）\",\n  \"from_lng\": 114.3155000,\n  \"from_lat\": 30.5932000,\n  \"to_addr\": \"5号楼302\",\n  \"to_lng\": 114.3035000,\n  \"to_lat\": 30.5888000,\n  \"weight_kg\": 1.0,\n  \"expect_deadline\": \"2026-11-17T18:00:00+08:00\",\n  \"urgent\": false,\n  \"declared_value\": 0\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('合计 350', () => pm.expect(d.fee_detail.total).to.eql(350));",
+            "pm.test('六项明细齐全', () => ['base_fee','distance_fee','weight_fee','urgent_fee','night_fee','total'].forEach(k => pm.expect(d.fee_detail).to.have.property(k)));",
+            "pm.collectionVariables.set('quote_token', d.quote_token);"
+          ] } }]
+        },
+        {
+          "name": "U-08 下单（幂等）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" },
+              { "key": "Idempotency-Key", "value": "smoke-order-001" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/order", "host": ["{{base_url}}"], "path": ["api", "user", "order"] },
+            "body": { "mode": "raw", "raw": "{\n  \"quote_token\": \"{{quote_token}}\",\n  \"item_desc\": \"冒烟测试用快递\",\n  \"remark\": \"\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('code=0', () => pm.expect(j.code).to.eql(0));",
+            "pm.collectionVariables.set('order_no', j.data.order_no);"
+          ] } }]
+        },
+        {
+          "name": "U-09 模拟支付",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/order/{{order_no}}/pay", "host": ["{{base_url}}"], "path": ["api", "user", "order", "{{order_no}}", "pay"] },
+            "body": { "mode": "raw", "raw": "{\n  \"pay_channel\": \"MOCK\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('code=0', () => pm.expect(j.code).to.eql(0));",
+            "pm.test('有收银台地址', () => pm.expect(j.data.mock_pay_url).to.be.a('string'));"
+          ] } }]
+        },
+        {
+          "name": "U-11 学生订单详情（WAITING）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{student_token}}" }],
+            "url": { "raw": "{{base_url}}/api/user/order/{{order_no}}", "host": ["{{base_url}}"], "path": ["api", "user", "order", "{{order_no}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('状态 WAITING', () => pm.expect(pm.response.json().data.status).to.eql('WAITING'));"
+          ] } }]
+        },
+        {
+          "name": "R-03 骑手上线",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/online", "host": ["{{base_url}}"], "path": ["api", "rider", "online"] },
+            "body": { "mode": "raw", "raw": "{\n  \"online\": true,\n  \"lng\": 114.3045000,\n  \"lat\": 30.5900000\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('code=0', () => pm.expect(pm.response.json().code).to.eql(0));"
+          ] } }]
+        },
+        {
+          "name": "R-05 任务大厅（GEO 1500m）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{rider_token}}" }],
+            "url": {
+              "raw": "{{base_url}}/api/rider/task/hall?lng=114.3045000&lat=30.5900000&radius_m=1500&sort=distance",
+              "host": ["{{base_url}}"],
+              "path": ["api", "rider", "task", "hall"],
+              "query": [
+                { "key": "lng", "value": "114.3045000" },
+                { "key": "lat", "value": "30.5900000" },
+                { "key": "radius_m", "value": "1500" },
+                { "key": "sort", "value": "distance" }
+              ]
+            }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('返回数组', () => pm.expect(pm.response.json().data).to.be.an('array'));"
+          ] } }]
+        },
+        {
+          "name": "R-06 抢单（Lua + 同步落库）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" },
+              { "key": "Idempotency-Key", "value": "smoke-grab-001" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/task/{{order_no}}/grab", "host": ["{{base_url}}"], "path": ["api", "rider", "task", "{{order_no}}", "grab"] },
+            "body": { "mode": "raw", "raw": "{\n  \"lng\": 114.3045000,\n  \"lat\": 30.5900000\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('抢单成功', () => pm.expect(j.data.success).to.eql(true));"
+          ] } }]
+        },
+        {
+          "name": "R-08 骑手订单详情（取 pickup_code）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{rider_token}}" }],
+            "url": { "raw": "{{base_url}}/api/rider/order/{{order_no}}", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "{{order_no}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('状态 ACCEPTED', () => pm.expect(d.status).to.eql('ACCEPTED'));",
+            "pm.collectionVariables.set('pickup_code', d.pickup_code);"
+          ] } }]
+        },
+        {
+          "name": "R-09 取件（正确取件码）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/order/{{order_no}}/pickup", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "{{order_no}}", "pickup"] },
+            "body": { "mode": "raw", "raw": "{\n  \"pickup_code\": \"{{pickup_code}}\",\n  \"photo_url\": \"https://example.com/mock/pickup.jpg\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('code=0', () => pm.expect(pm.response.json().code).to.eql(0));"
+          ] } }]
+        },
+        {
+          "name": "R-10 送达（定位打卡）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/order/{{order_no}}/deliver", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "{{order_no}}", "deliver"] },
+            "body": { "mode": "raw", "raw": "{\n  \"lng\": 114.3035000,\n  \"lat\": 30.5888000,\n  \"photo_url\": \"https://example.com/mock/deliver.jpg\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('code=0', () => pm.expect(pm.response.json().code).to.eql(0));"
+          ] } }]
+        },
+        {
+          "name": "U-14 确认收货（触发结算）",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{student_token}}" }],
+            "url": { "raw": "{{base_url}}/api/user/order/{{order_no}}/confirm", "host": ["{{base_url}}"], "path": ["api", "user", "order", "{{order_no}}", "confirm"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('code=0', () => pm.expect(pm.response.json().code).to.eql(0));"
+          ] } }]
+        },
+        {
+          "name": "A-20 结算列表（应出现该单）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/admin/settlement/page?page=1&page_size=10", "host": ["{{base_url}}"], "path": ["api", "admin", "settlement", "page"], "query": [{ "key": "page", "value": "1" }, { "key": "page_size", "value": "10" }] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('有结算记录', () => pm.expect(d.total).to.be.at.least(1));"
+          ] } }]
+        },
+        {
+          "name": "U-17 提交售后工单（超时）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" },
+              { "key": "Idempotency-Key", "value": "smoke-ticket-001" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/ticket", "host": ["{{base_url}}"], "path": ["api", "user", "ticket"] },
+            "body": { "mode": "raw", "raw": "{\n  \"order_no\": \"{{order_no}}\",\n  \"type\": 1,\n  \"description\": \"说好六点前送到，实际晚了45分钟\",\n  \"evidence_urls\": [\"https://example.com/mock/evidence.jpg\"]\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('返回 ticket_no', () => pm.expect(d.ticket_no).to.not.be.empty);",
+            "pm.collectionVariables.set('ticket_no', d.ticket_no);"
+          ] } }]
+        },
+        {
+          "name": "A-12 运营查看工单",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{admin_token}}" }],
+            "url": { "raw": "{{base_url}}/api/admin/ticket/{{ticket_no}}", "host": ["{{base_url}}"], "path": ["api", "admin", "ticket", "{{ticket_no}}"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('状态 PENDING 或 REVIEWING', () => pm.expect(d.status).to.be.oneOf(['PENDING','REVIEWING']));"
+          ] } }]
+        },
+        {
+          "name": "U-20 Agent 对话（第 1 轮）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/agent/chat", "host": ["{{base_url}}"], "path": ["api", "user", "agent", "chat"] },
+            "body": { "mode": "raw", "raw": "{\n  \"session_id\": null,\n  \"message\": \"下午五点前帮我把菜鸟驿站的快递拿到5号楼302\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('有 session_id 与 reply', () => { pm.expect(d.session_id).to.not.be.empty; pm.expect(d.reply).to.not.be.empty; });",
+            "pm.collectionVariables.set('session_id', d.session_id);"
+          ] } }]
+        },
+        {
+          "name": "P-05 Agent 健康检查",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{agent_base_url}}/agent/health", "host": ["{{agent_base_url}}"], "path": ["agent", "health"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('status=ok', () => pm.expect(j.status).to.eql('ok'));",
+            "pm.test('向量库有数据', () => pm.expect(j.vector_count).to.be.at.least(10));"
+          ] } }]
+        },
+        {
+          "name": "内部工具 list_policy_docs（灌库/白名单）",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Agent-Token", "value": "{{agent_token}}" },
+              { "key": "X-Session-Id", "value": "{{session_id}}" },
+              { "key": "X-Trace-Id", "value": "smoke-tool-001" }
+            ],
+            "url": { "raw": "{{base_url}}/internal/agent/policy-docs", "host": ["{{base_url}}"], "path": ["internal", "agent", "policy-docs"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const d = pm.response.json().data; pm.test('10 条条款', () => pm.expect(d.length).to.eql(10));"
+          ] } }]
+        }
+      ]
+    },
+    {
+      "name": "03 失败分支与安全",
+      "item": [
+        {
+          "name": "N-01 已被抢再抢（40902）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/task/{{order_no}}/grab", "host": ["{{base_url}}"], "path": ["api", "rider", "task", "{{order_no}}", "grab"] },
+            "body": { "mode": "raw", "raw": "{\n  \"lng\": 114.3045000,\n  \"lat\": 30.5900000\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('已被抢', () => pm.expect(j.code).to.be.oneOf([40902, 40901]));"
+          ] } }]
+        },
+        {
+          "name": "N-02 未上线骑手抢单（40906，需先下线）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/task/CR20261117000005/grab", "host": ["{{base_url}}"], "path": ["api", "rider", "task", "CR20261117000005", "grab"] },
+            "body": { "mode": "raw", "raw": "{\n  \"lng\": 114.3045000,\n  \"lat\": 30.5900000\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('骑手不可用', () => pm.expect(pm.response.json().code).to.eql(40906));"
+          ] } }]
+        },
+        {
+          "name": "N-03 非接单人取件（40303）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/order/CR20261117000003/pickup", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "CR20261117000003", "pickup"] },
+            "body": { "mode": "raw", "raw": "{\n  \"pickup_code\": \"0000\",\n  \"photo_url\": \"https://example.com/mock/pickup.jpg\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('非接单人越权', () => pm.expect(pm.response.json().code).to.eql(40303));"
+          ] } }]
+        },
+        {
+          "name": "N-04 申报价值超限（40007）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/order/quote", "host": ["{{base_url}}"], "path": ["api", "user", "order", "quote"] },
+            "body": { "mode": "raw", "raw": "{\n  \"category\": 1,\n  \"from_lng\": 114.3155000, \"from_lat\": 30.5932000,\n  \"to_lng\": 114.3035000, \"to_lat\": 30.5888000,\n  \"weight_kg\": 1.0,\n  \"expect_deadline\": \"2026-11-17T18:00:00+08:00\",\n  \"urgent\": false,\n  \"declared_value\": 60000\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('申报超限', () => pm.expect(pm.response.json().code).to.eql(40007));"
+          ] } }]
+        },
+        {
+          "name": "N-05 学生 token 调骑手接口（40301）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{student_token}}" }],
+            "url": { "raw": "{{base_url}}/api/rider/profile", "host": ["{{base_url}}"], "path": ["api", "rider", "profile"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('越权', () => pm.expect(pm.response.json().code).to.eql(40301));"
+          ] } }]
+        },
+        {
+          "name": "N-06 学生查他人订单（40303）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{student_token}}" }],
+            "url": { "raw": "{{base_url}}/api/user/order/CR20261117000004", "host": ["{{base_url}}"], "path": ["api", "user", "order", "CR20261117000004"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('越权', () => pm.expect(pm.response.json().code).to.eql(40303));"
+          ] } }]
+        },
+        {
+          "name": "N-07 Agent 调 refund_order（40302）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-Agent-Token", "value": "{{agent_token}}" },
+              { "key": "X-Session-Id", "value": "{{session_id}}" }
+            ],
+            "url": { "raw": "{{base_url}}/internal/agent/refund_order", "host": ["{{base_url}}"], "path": ["internal", "agent", "refund_order"] },
+            "body": { "mode": "raw", "raw": "{\n  \"order_no\": \"{{order_no}}\",\n  \"amount\": 350\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('高危工具被拒', () => pm.expect(pm.response.json().code).to.eql(40302));"
+          ] } }]
+        },
+        {
+          "name": "N-08 内部工具缺 X-Session-Id（40001）",
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "X-Agent-Token", "value": "{{agent_token}}" }],
+            "url": { "raw": "{{base_url}}/internal/agent/policy-docs", "host": ["{{base_url}}"], "path": ["internal", "agent", "policy-docs"] }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('缺会话头', () => pm.expect(pm.response.json().code).to.eql(40001));"
+          ] } }]
+        },
+        {
+          "name": "N-09 幂等重放（同 key 同参，返回首次结果）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" },
+              { "key": "Idempotency-Key", "value": "smoke-order-001" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/order", "host": ["{{base_url}}"], "path": ["api", "user", "order"] },
+            "body": { "mode": "raw", "raw": "{\n  \"quote_token\": \"{{quote_token}}\",\n  \"item_desc\": \"冒烟测试用快递\",\n  \"remark\": \"\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('返回首次订单', () => { pm.expect(j.code).to.eql(0); pm.expect(j.data.order_no).to.eql(pm.collectionVariables.get('order_no')); });"
+          ] } }]
+        },
+        {
+          "name": "N-10 取消他人订单（40303）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{student_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/user/order/CR20261117000003/cancel", "host": ["{{base_url}}"], "path": ["api", "user", "order", "CR20261117000003", "cancel"] },
+            "body": { "mode": "raw", "raw": "{\n  \"reason\": \"冒烟测试\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('越权取消', () => pm.expect(pm.response.json().code).to.eql(40303));"
+          ] } }]
+        },
+        {
+          "name": "辅助：接单骑手登录（李四，订单 3 接单人）",
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": { "raw": "{{base_url}}/api/auth/rider/login", "host": ["{{base_url}}"], "path": ["api", "auth", "rider", "login"] },
+            "body": { "mode": "raw", "raw": "{\n  \"phone\": \"13800000007\",\n  \"password\": \"123456\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "const j = pm.response.json(); pm.test('登录成功', () => { pm.expect(j.code).to.eql(0); pm.collectionVariables.set('rider2_token', j.data.token); });"
+          ] } }]
+        },
+        {
+          "name": "N-11 取件码错误第 1 次（40005）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider2_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/order/CR20261117000003/pickup", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "CR20261117000003", "pickup"] },
+            "body": { "mode": "raw", "raw": "{\n  \"pickup_code\": \"1111\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('取件码错误，剩余 2 次', () => pm.expect(pm.response.json().code).to.eql(40005));"
+          ] } }]
+        },
+        {
+          "name": "N-12 取件码错误第 2 次（40005）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider2_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/order/CR20261117000003/pickup", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "CR20261117000003", "pickup"] },
+            "body": { "mode": "raw", "raw": "{\n  \"pickup_code\": \"2222\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('取件码错误，剩余 1 次', () => pm.expect(pm.response.json().code).to.eql(40005));"
+          ] } }]
+        },
+        {
+          "name": "N-13 取件码错误第 3 次（40905，锁 10 分钟）",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{rider2_token}}" }
+            ],
+            "url": { "raw": "{{base_url}}/api/rider/order/CR20261117000003/pickup", "host": ["{{base_url}}"], "path": ["api", "rider", "order", "CR20261117000003", "pickup"] },
+            "body": { "mode": "raw", "raw": "{\n  \"pickup_code\": \"3333\"\n}" }
+          },
+          "event": [{ "listen": "test", "script": { "type": "text/javascript", "exec": [
+            "pm.test('连错三次锁定', () => pm.expect(pm.response.json().code).to.eql(40905));"
+          ] } }]
+        }
+      ]
+    }
+  ]
+}
