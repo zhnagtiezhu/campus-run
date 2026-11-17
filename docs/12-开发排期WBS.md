@@ -11,7 +11,7 @@
 - [ ] 装齐环境（JDK17 / Maven / Node / Python3.11 / Docker / JMeter）
 - [ ] 申请 LLM API Key、高德 JS Key + 安全密钥，写入 `.env`
 - [ ] 下载 `bge-small-zh-v1.5` 到本地
-- [ ] 建仓库 `campus-run`（remote: github.com/zhnagtiezhu/campus-run），目录：`docs/ build/ backend-java/ agent-python/ frontend/ deploy/ tests/`
+- [x] 建仓库 `campus-run`（remote: github.com/zhnagtiezhu/campus-run），目录：`docs/ build/ backend-java/ agent-python/ frontend/ deploy/ tests/`
 - [x] 本套文档（00–14 + 附件 + 评审）入库，tag `v1.2-docs`
 - [x] `deploy/mysql/init/01-schema.sql`（**22 张表**）+ `02-demo-data.sql`（**7 单 / 4 工单 / 14 账号**）
 - [ ] `docker compose` 起 MySQL/Redis/MinIO，灌数据，`tests/sql/verify-demo-data.sql` 跑出 **38 个 PASS**
